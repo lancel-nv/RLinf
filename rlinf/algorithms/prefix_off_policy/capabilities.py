@@ -24,3 +24,5 @@ class PrefixAlgorithmRequirements:
     min_q_heads: int = 2
     requires_action_noise: bool = False
     uses_target_actor: bool = False
+    trains_entropy_temperature: bool = False
+    rollout_uses_target_critic: bool = False

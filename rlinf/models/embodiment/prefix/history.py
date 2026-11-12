@@ -136,11 +136,7 @@ class StateHistoryBuffer:
             seen[rows] = True
             self._buffer, self._seen = buffer, seen
         fused = torch.cat([z_rl, history.reshape(batch_size, -1)], dim=-1)
-        return {
-            "z_rl": fused,
-            "proprio": obs["proprio"],
-            "ref_chunk": obs["ref_chunk"],
-        }
+        return {**obs, "z_rl": fused}
 
     def _allocate(
         self,

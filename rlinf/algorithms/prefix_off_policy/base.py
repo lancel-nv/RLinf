@@ -42,6 +42,8 @@ class PrefixOffPolicyContext(Protocol):
     target_model: Any
     torch_dtype: torch.dtype
     update_step: int
+    entropy_temp: Any
+    critic_sample_generator: torch.Generator
 
 
 class PrefixOffPolicyAlgorithm(ABC):
@@ -55,6 +57,16 @@ class PrefixOffPolicyAlgorithm(ABC):
         self.critic_capabilities = get_prefix_critic_spec(critic_cfg.name).capabilities
         self.num_q_heads = self.critic_capabilities.num_q_heads(critic_cfg)
         self.validate_configuration()
+
+    num_candidates: int | None = None
+
+    def predict_action_batch(self, model: Any, obs: dict, *, mode: str) -> tuple:
+        """Select rollout actions using the algorithm's inference contract."""
+        return model.predict_action_batch(env_obs=obs, mode=mode, return_obs=True)
+
+    def alpha_loss(self, context: PrefixOffPolicyContext, batch: dict) -> torch.Tensor:
+        """Return a temperature objective only for algorithms that train alpha."""
+        raise NotImplementedError("This Prefix algorithm requires fixed_alpha.")
 
     def validate_configuration(self) -> None:
         """Reject actor, critic, and algorithm combinations that cannot run."""
@@ -89,9 +101,9 @@ class PrefixOffPolicyAlgorithm(ABC):
         # whenever alpha_type is not fixed_alpha.
         entropy_cfg = self.cfg.algorithm.get("entropy_tuning", None) or {}
         alpha_type = entropy_cfg.get("alpha_type", "softplus")
-        if alpha_type != "fixed_alpha":
+        if not requirements.trains_entropy_temperature and alpha_type != "fixed_alpha":
             raise ValueError(
-                "Prefix off-policy algorithms do not train an entropy "
+                "The selected Prefix algorithm does not train an entropy "
                 "temperature; expected algorithm.entropy_tuning.alpha_type="
                 f"'fixed_alpha', got {alpha_type!r}."
             )

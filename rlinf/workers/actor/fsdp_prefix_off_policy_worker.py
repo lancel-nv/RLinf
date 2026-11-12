@@ -48,6 +48,18 @@ class PrefixOffPolicyRuntime:
         self.update_schedule = PrefixUpdateSchedule(cfg)
         self._last_replay_metrics: dict[str, float] = {}
 
+    def get_rollout_state_dict(self) -> dict:
+        """Publish online actor weights with the critic used for action selection."""
+        online = super().get_rollout_state_dict()
+        if not self.algorithm_component.requirements.rollout_uses_target_critic:
+            return online
+        from rlinf.algorithms.prefix_off_policy.expo import rollout_actor_target_critic
+
+        target = self._strategy.get_model_state_dict(
+            self.target_model, cpu_offload=False, full_state_dict=False
+        )
+        return rollout_actor_target_critic(online, target)
+
     def get_rollout_sync_version(self) -> int:
         """Return the model version that controls online actor routing."""
         return self.update_schedule.rollout_version(
@@ -87,12 +99,8 @@ class PrefixOffPolicyRuntime:
 
     @Worker.timer("forward_alpha")
     def forward_alpha(self, batch):
-        """Reject entropy-temperature training for prefix algorithms."""
-        del batch
-        raise NotImplementedError(
-            "Prefix off-policy algorithms disable entropy/alpha training. Use "
-            "algorithm.entropy_tuning.alpha_type=fixed_alpha."
-        )
+        """Delegate entropy-temperature training to algorithms that support it."""
+        return self.algorithm_component.alpha_loss(self, batch)
 
     def _ingest_rollout_trajectories(
         self,

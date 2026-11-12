@@ -1897,7 +1897,7 @@ def test_history_reward_assignment_matches_main_across_chunks():
     assert torch.equal(trajectory.rewards, torch.tensor([[[7.0]], [[7.0]]]))
 
 
-@pytest.mark.parametrize("algorithm_name", ["ac", "td3"])
+@pytest.mark.parametrize("algorithm_name", ["ac", "td3", "expo"])
 def test_prefix_output_matches_main_transition_and_intervention_behavior(
     algorithm_name,
 ):
@@ -1941,10 +1941,25 @@ def test_prefix_output_matches_main_transition_and_intervention_behavior(
         initial_transition=EnvTransition(),
     )
 
+    if algorithm_name == "expo":
+        current_candidates = torch.arange(6, dtype=torch.float32).reshape(1, 3, 1, 2)
+        next_candidates = current_candidates + 20
+        policy.output.forward_inputs["candidates"] = current_candidates
+        env.next_rlt_obs["candidates"] = next_candidates
+
     [(_, trajectory)] = _collect(collector, env, policy)
 
-    assert set(trajectory.curr_obs) == {"z_rl", "proprio", "ref_chunk"}
-    assert set(trajectory.next_obs) == {"z_rl", "proprio", "ref_chunk"}
+    keys = {"z_rl", "proprio", "ref_chunk"}
+    if algorithm_name == "expo":
+        keys.add("candidates")
+        torch.testing.assert_close(
+            trajectory.curr_obs["candidates"][0], current_candidates
+        )
+        torch.testing.assert_close(
+            trajectory.next_obs["candidates"][0], next_candidates
+        )
+    assert set(trajectory.curr_obs) == keys
+    assert set(trajectory.next_obs) == keys
     assert torch.equal(trajectory.curr_obs["ref_chunk"][0], intervened_chunk)
     assert torch.equal(
         trajectory.next_obs["ref_chunk"][0], torch.tensor([[11.0, 12.0]])

@@ -123,7 +123,7 @@ Replay 与更新
    action   = 实际发送给环境的 action chunk
    next_obs = {next_z_rl, next_proprio, next_ref_chunk}
 
-critic 按 ``gamma`` 对 chunk 内 reward 折扣，再用 ``gamma ** chunk_horizon`` bootstrap 下一状态的 Q。actor objective 为 ``-q_weight * Q + bc_weight * BC``。BC 通常以 ``ref_chunk`` 为目标；带 intervention 标记的 step 则使用实际执行的 intervention action。
+AC 和 TD3 的 critic 按 ``gamma`` 对 chunk 内 reward 折扣，再用 ``gamma ** chunk_horizon`` bootstrap 下一状态的 Q。actor objective 为 ``-q_weight * Q + bc_weight * BC``。BC 通常以 ``ref_chunk`` 为目标；带 intervention 标记的 step 则使用实际执行的 intervention action。
 
 配置最小示例
 ------------
@@ -464,6 +464,64 @@ actor objective、critic target 或下一动作的生成规则发生变化时，
 可选的 ``_actor_loss`` helper 为 AC、TD3 复用 intervention-aware BC target、BC/Q weight schedule 和 Q 聚合。其他 objective 可以直接实现 ``actor_loss``。在 registry 的 ``_load_builtin_algorithms`` 中导入模块后，设置 ``algorithm.name: my_algorithm``，继续使用 ``loss_type: prefix_off_policy``。
 
 内置 ``ac`` 用在线 stochastic actor 生成下一动作，要求 ``algorithm.actor_agg_q: q1``。``td3`` 的 target action 不加噪声，也不使用 target policy smoothing；rollout 保留探索噪声，actor 更新时是否加噪声由 ``algorithm.actor_update_action_noise`` 单独控制。actor Q 聚合支持 ``min``、``q1``、``mean``。两种算法的 critic target 都取前两个 Q head 的最小值；``multi_q_mlp`` 的其余 head 回归到同一个 target，因此应省略 ``algorithm.agg_q`` 字段或将它设为 ``min``。两者都要求 ``algorithm.entropy_tuning.alpha_type: fixed_alpha``，不训练 entropy temperature。构建算法时会校验这些设置。
+
+用冻结模型候选动作训练 EXPO
+---------------------------
+
+如果希望策略从冻结 VLA 的候选动作及其小幅修正中选出执行动作，可以使用 EXPO。以 ``examples/embodiment/config/maniskill_prefix_expo_openpi_pi05_async.yaml`` 为起点：它使用现有 OpenPI Prefix 特征、随机 ``residual_mlp`` 编辑器和十个 ``multi_q_mlp`` critic，任务是 ManiSkill 关节动作控制的完整抓取插孔。
+
+准备 OpenPI/ManiSkill 环境和两张 GPU，将 ``rollout.prefix_feature_model.model_path`` 与 ``rollout.prefix_feature_model.openpi_data.norm_stats_path`` 分别设为相互匹配的关节动作 SFT 检查点和归一化统计文件。在已激活的环境中运行：
+
+.. code:: bash
+
+   bash examples/embodiment/run_async.sh maniskill_prefix_expo_openpi_pi05_async
+
+命令会启动异步采集和训练，记录 TensorBoard 指标并保存评测视频。启动前可在示例中调整硬件放置、环境数量，以及按 epoch 设置的评测和保存间隔。这个示例演示通用 Prefix 接口；具体任务的编码器、动作表示和成功率需要单独验证。
+
+候选选择与参数更新
+^^^^^^^^^^^^^^^^^^
+
+每个观测先由冻结模型采样 ``algorithm.num_candidates`` 个动作 chunk，再对前 ``algorithm.num_edits`` 个候选各做一次有界随机修正。示例将两个参数都设为八，因此共有十六个选项。选择器随机抽取两个 target critic，以二者的最小 Q 为每个选项打分，执行分数最高的 chunk。训练和评测都保留随机编辑和随机 critic 对选择。
+
+critic target 将一个执行 chunk 内的奖励相加，对下一状态价值只施加一次 ``gamma`` 折扣。下一动作由在线编辑器和 target critic 选出，再独立抽取另一对 target critic 计算该动作的 bootstrap 值。真正终止的 transition 停止 bootstrap；``algorithm.bootstrap_time_limits: true`` 时，超时继续 bootstrap。EXPO 要求 ``backup_entropy: false``，所有在线 critic 回归到同一个 target。
+
+actor 对 replay 中实际执行的动作进行编辑，并最小化 ``alpha * log_prob - mean(Q)``，其中 Q 取全部在线 critic 的均值。温度训练使用相同的 replay 动作作为编辑条件。示例的 ``algorithm.entropy_tuning.initial_alpha`` 为 ``1e-5``。``target_entropy: null`` 时，对整个执行 chunk 的每个坐标累加 ``log(edit_scale_i) - 0.5`` 作为目标熵。十步、每步八维、尺度 ``0.02`` 对应约 ``-352.96``。编辑动作的概率密度同时计入 tanh 和尺度变换的 Jacobian。
+
+``ref_chunk`` 和 ``candidates`` 使用环境适配器接受的动作坐标。OpenPI 沿用已有的 output transform 解码每个候选。``actor_head.edit_scale`` 使用同一坐标系，可配置为正标量或沿展平 chunk 重复的向量。``0.02`` 表示动作坐标上的修正上限，具体物理含义取决于环境控制器。
+
+采集、回放与检查点
+^^^^^^^^^^^^^^^^^^
+
+设置 ``rollout.policy_routing: full_task`` 可采集完整任务，同时关闭 routing gate，并移除 ``expert_model`` 配置。示例在收集至少 4,000 个 chunk transition 并完成 20,000 次 learner 预热更新期间，执行冻结模型的参考动作。沿用 Prefix 原有调度，从预热开始，每二十次 critic 更新就执行一次 actor 和温度更新。预热后 rollout 启用 EXPO 选择，learner 每新增一个 transition 分配二十次 critic minibatch 更新。每次更新使用 256 个样本，Q head 数量不会乘进更新次数。每轮追赶更新的上限由 ``rlt_schedule.max_updates_per_train_step`` 控制。
+
+EXPO 将特征调用扩展为 ``extract_prefix_obs(env_obs, num_candidates=K)``。适配器除原有字段外，还需返回形状为 ``[B, K, L, A]`` 的 ``candidates``，首个候选必须等于 ``ref_chunk``。OpenPI 在多次候选采样间复用当前观测的 Prefix cache。Rollout 保留实际执行长度，将当前与下一观测的候选都写入 replay，终止观测也走同一流程。其他算法继续使用原来的特征调用。EXPO 目标函数只依赖这些张量、奖励和终止标志；任务初始化、控制器解码和几何信息属于环境适配器。
+
+Rollout 权重同步会一起发布在线编辑器和 target critic。检查点沿用已有 SAC 保存流程；恢复训练使用 ``runner.resume_dir``。单独评测前，从同一个 actor 检查点目录中读取在线模型和 target 模型，合并所需权重：
+
+.. code:: python
+
+   from pathlib import Path
+
+   import torch
+
+   from rlinf.algorithms.prefix_off_policy.expo import rollout_actor_target_critic
+
+   actor_dir = Path("/path/to/actor/checkpoint")
+   online = torch.load(
+       actor_dir / "model_state_dict/full_weights.pt",
+       map_location="cpu",
+       weights_only=True,
+   )
+   target = torch.load(
+       actor_dir / "sac_components/target_model/checkpoint_rank_0.pt",
+       map_location="cpu",
+       weights_only=True,
+   )
+   torch.save(rollout_actor_target_critic(online, target), actor_dir / "expo_eval.pt")
+
+运行 ``evaluations/eval_embodied_agent.py`` 时，设置 ``runner.only_eval: true``，并将 ``runner.ckpt_path`` 指向生成的 ``expo_eval.pt``。如果只加载在线模型权重，候选选择使用的 critic 就会与 rollout 不同。
+
+其他算法若需要这些行为，可在 requirements 中声明 ``trains_entropy_temperature`` 或 ``rollout_uses_target_critic``，覆盖 ``alpha_loss`` 实现温度训练，覆盖 ``predict_action_batch`` 实现 rollout 选择器。Replay、优化器、target 更新与权重同步仍由现有 Prefix worker 管理。
 
 实现位置与检查点
 ----------------

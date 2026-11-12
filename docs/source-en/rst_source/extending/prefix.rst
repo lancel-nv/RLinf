@@ -123,7 +123,7 @@ An environment declares calibration labels through ``TrajectoryInfoProvider.traj
    action   = action chunk actually sent to the environment
    next_obs = {next_z_rl, next_proprio, next_ref_chunk}
 
-The critic discounts rewards within each chunk by ``gamma`` and bootstraps the next-state Q with ``gamma ** chunk_horizon``. The actor objective is ``-q_weight * Q + bc_weight * BC``. BC normally targets ``ref_chunk``; steps marked as interventions use the executed intervention action.
+For AC and TD3, the critic discounts rewards within each chunk by ``gamma`` and bootstraps the next-state Q with ``gamma ** chunk_horizon``. The actor objective is ``-q_weight * Q + bc_weight * BC``. BC normally targets ``ref_chunk``; steps marked as interventions use the executed intervention action.
 
 Minimal Configuration
 ---------------------
@@ -464,6 +464,64 @@ This example reuses the shared BC/Q objective with minimum-Q aggregation and get
 The optional ``_actor_loss`` helper shares intervention-aware BC targets, BC/Q weight schedules, and Q aggregation between AC and TD3. Implement ``actor_loss`` directly for a different objective. Import the algorithm module from the registry's ``_load_builtin_algorithms`` and select ``algorithm.name: my_algorithm`` with ``loss_type: prefix_off_policy``.
 
 The built-in ``ac`` uses the online stochastic actor for next actions and requires ``algorithm.actor_agg_q: q1``. ``td3`` uses noise-free target actions, rollout exploration noise, and ``min``, ``q1``, or ``mean`` actor-Q aggregation. It does not apply target policy smoothing. ``algorithm.actor_update_action_noise`` separately controls noise during actor updates. The critic target in either algorithm is the minimum of the first two Q heads. Extra ``multi_q_mlp`` heads regress to the same target, so leave ``algorithm.agg_q`` unset or set it to ``min``. Both algorithms require ``algorithm.entropy_tuning.alpha_type: fixed_alpha``; they do not train an entropy temperature. These settings are checked when the algorithm is built.
+
+Run EXPO with Frozen Proposals
+------------------------------
+
+Use EXPO when the learned policy should select among frozen VLA proposals and small edits of those proposals. Start from ``examples/embodiment/config/maniskill_prefix_expo_openpi_pi05_async.yaml``. It uses the existing OpenPI Prefix features, a stochastic ``residual_mlp`` editor, and ten ``multi_q_mlp`` critics. The example uses ManiSkill joint actions and the full pick-and-insert task.
+
+Prepare the OpenPI/ManiSkill environment and two GPUs, then set ``rollout.prefix_feature_model.model_path`` and ``rollout.prefix_feature_model.openpi_data.norm_stats_path`` to a matching joint-action SFT checkpoint and its normalization statistics. From the activated environment, run:
+
+.. code:: bash
+
+   bash examples/embodiment/run_async.sh maniskill_prefix_expo_openpi_pi05_async
+
+This launches asynchronous collection and training, with TensorBoard metrics and evaluation videos. Adjust placement, environment counts, and epoch-based evaluation/checkpoint intervals in the example before launching. The preset illustrates the generic Prefix contract; task-specific encoders, action representations, and success rates need separate validation.
+
+Proposal Selection and Updates
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+At each observation, the frozen model samples ``algorithm.num_candidates`` action chunks. The editor makes one bounded stochastic edit of each of the first ``algorithm.num_edits`` proposals. With the example's values of eight and eight, the selector scores sixteen choices using the minimum of two randomly selected target critics and executes the highest-scoring chunk. Training and evaluation both use stochastic edits and critic-pair selection.
+
+The critic target sums rewards within the executed chunk and applies ``gamma`` once to the next-state value. Next-action selection uses the online editor and target critics; an independently drawn target-critic pair evaluates the selected action for the backup. Terminal transitions stop bootstrapping. Time limits retain bootstrap when ``algorithm.bootstrap_time_limits: true``. EXPO requires ``backup_entropy: false`` and trains every online critic against the same target.
+
+The actor edits the action actually recorded in replay and minimizes ``alpha * log_prob - mean(Q)`` over all online critics. Temperature training uses the same replay-action conditioning. ``algorithm.entropy_tuning.initial_alpha`` defaults to ``1e-5`` in the example. With ``target_entropy: null``, the target is the sum of ``log(edit_scale_i) - 0.5`` over all coordinates of the executed chunk. For ten eight-dimensional actions with scale ``0.02``, this is approximately ``-352.96``. The edit density includes both the tanh Jacobian and the scale Jacobian.
+
+``ref_chunk`` and ``candidates`` use the coordinates accepted by the environment adapter. OpenPI applies its existing output transform to each proposal. Set ``actor_head.edit_scale`` in those coordinates: it accepts a positive scalar or a vector repeated across the flattened chunk. A value of ``0.02`` is an action-coordinate bound, whose physical meaning depends on the environment controller.
+
+Collection, Replay, and Checkpoints
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Set ``rollout.policy_routing: full_task`` to collect the whole task, with the routing gate disabled and no ``expert_model`` configured. The example executes the frozen reference while collecting at least 4,000 chunk transitions and performing 20,000 learner warmup updates. The existing Prefix schedule updates the actor and temperature every twenty critic updates, including during warmup. After warmup, rollout enables EXPO selection and the learner budgets twenty critic minibatch updates per new transition. Each update uses a batch of 256; the number of Q heads does not multiply this update count. The learner catches up in groups capped by ``rlt_schedule.max_updates_per_train_step``.
+
+EXPO extends the feature call to ``extract_prefix_obs(env_obs, num_candidates=K)``. An adapter must return ``candidates`` shaped ``[B, K, L, A]`` in addition to the usual fields, with its first proposal equal to ``ref_chunk``. OpenPI reuses the observation's Prefix cache across candidate samples. Rollout keeps the executed horizon and stores candidates for both the current and next observation, including terminal observations. Other algorithms retain the original feature call. The EXPO objectives depend only on these tensors, rewards, and termination flags. Task initialization, controller decoding, and geometry stay in environment adapters.
+
+Rollout weight synchronization publishes the online editor together with the target critics. Checkpoint saving uses the existing SAC implementation; resume training with ``runner.resume_dir``. For standalone evaluation, combine the saved online actor and target critic weights from the same actor checkpoint directory:
+
+.. code:: python
+
+   from pathlib import Path
+
+   import torch
+
+   from rlinf.algorithms.prefix_off_policy.expo import rollout_actor_target_critic
+
+   actor_dir = Path("/path/to/actor/checkpoint")
+   online = torch.load(
+       actor_dir / "model_state_dict/full_weights.pt",
+       map_location="cpu",
+       weights_only=True,
+   )
+   target = torch.load(
+       actor_dir / "sac_components/target_model/checkpoint_rank_0.pt",
+       map_location="cpu",
+       weights_only=True,
+   )
+   torch.save(rollout_actor_target_critic(online, target), actor_dir / "expo_eval.pt")
+
+Set ``runner.only_eval: true`` and point ``runner.ckpt_path`` to the resulting ``expo_eval.pt`` when running ``evaluations/eval_embodied_agent.py``. Loading only the online weights would change the critics used for candidate selection.
+
+To extend another algorithm with these behaviors, declare ``trains_entropy_temperature`` or ``rollout_uses_target_critic`` in its requirements. Override ``alpha_loss`` for temperature training and ``predict_action_batch`` for a custom rollout selector. The existing Prefix worker continues to own replay, optimization, target updates, and weight synchronization.
 
 Implementation and Checkpoints
 ------------------------------

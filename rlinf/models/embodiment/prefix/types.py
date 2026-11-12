@@ -16,8 +16,10 @@ from enum import Enum
 from typing import TypedDict
 
 import torch
+from typing_extensions import NotRequired
 
 PREFIX_OBS_KEYS = ("z_rl", "proprio", "ref_chunk")
+PREFIX_OPTIONAL_OBS_KEYS = ("candidates",)
 
 
 class PrefixForwardType(Enum):
@@ -38,3 +40,4 @@ class PrefixObs(TypedDict):
     z_rl: torch.Tensor
     proprio: torch.Tensor
     ref_chunk: torch.Tensor
+    candidates: NotRequired[torch.Tensor]

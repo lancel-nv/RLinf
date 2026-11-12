@@ -18,6 +18,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
+from rlinf.algorithms.prefix_off_policy import build_prefix_off_policy_algorithm
 from rlinf.algorithms.prefix_off_policy.route import (
     PrefixRouteContext,
     build_prefix_route,
@@ -43,6 +44,7 @@ from rlinf.models.embodiment.prefix.contracts import (
     check_prefix_feature_dim,
     extract_prefix_obs,
 )
+from rlinf.models.embodiment.prefix.types import PREFIX_OPTIONAL_OBS_KEYS
 
 
 class PrefixRolloutRuntime:
@@ -62,6 +64,11 @@ class PrefixRolloutRuntime:
             cfg.rollout.model
             if cfg.get("runner", {}).get("only_eval", False)
             else cfg.actor.model
+        )
+        self.algorithm = (
+            build_prefix_off_policy_algorithm(cfg)
+            if cfg.algorithm.get("name")
+            else None
         )
         self.policy_model = policy_model
         self.feature_model = feature_model
@@ -146,7 +153,21 @@ class PrefixRolloutRuntime:
         commit: bool,
         dones: torch.Tensor | None = None,
     ) -> dict:
-        features = extract_prefix_obs(self.feature_model, obs)
+        features = extract_prefix_obs(
+            self.feature_model,
+            obs,
+            num_candidates=self.algorithm.num_candidates
+            if self.algorithm is not None
+            else None,
+        )
+        if "candidates" in features:
+            if features["candidates"].shape[2] < self.model_cfg.num_action_chunks:
+                raise ValueError(
+                    "Candidate horizon must cover the executed action chunk."
+                )
+            features["candidates"] = features["candidates"][
+                :, :, : self.model_cfg.num_action_chunks
+            ].contiguous()
         sizes = [source.size for source in sources]
         feature_parts = split_batch_value(features, sizes)
         done_parts = split_batch_value(dones, sizes)
@@ -227,9 +248,14 @@ class PrefixRolloutRuntime:
         features = self._features(
             request.obs, sources, mode, commit=True, dones=request.dones
         )
-        actions, result = self.policy_model.predict_action_batch(
-            env_obs=features, mode=mode, return_obs=True
-        )
+        if self.algorithm is None:
+            actions, result = self.policy_model.predict_action_batch(
+                env_obs=features, mode=mode, return_obs=True
+            )
+        else:
+            actions, result = self.algorithm.predict_action_batch(
+                self.policy_model, features, mode=mode
+            )
         if isinstance(actions, np.ndarray):
             actions = torch.from_numpy(actions)
         actor_switch = request.rlt_switch_flags
@@ -264,7 +290,11 @@ class PrefixRolloutRuntime:
                 version=version,
             )
         )
-        for key in PREFIX_OBS_KEYS:
+        keys = (
+            *PREFIX_OBS_KEYS,
+            *(key for key in PREFIX_OPTIONAL_OBS_KEYS if key in features),
+        )
+        for key in keys:
             output.result["forward_inputs"][f"{PREFIX_TRANSITION_PREFIX}{key}"] = (
                 features[key]
             )

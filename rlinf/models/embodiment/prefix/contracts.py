@@ -26,7 +26,9 @@ class PrefixFeatureModel(Protocol):
     @property
     def z_dim(self) -> int: ...
 
-    def extract_prefix_obs(self, env_obs: dict[str, Any]) -> PrefixObs:
+    def extract_prefix_obs(
+        self, env_obs: dict[str, Any], *, num_candidates: int | None = None
+    ) -> PrefixObs:
         """Extract the compact observation consumed by the trainable policy."""
         ...
 
@@ -46,6 +48,8 @@ class TrainablePrefixPolicy(Protocol):
 def extract_prefix_obs(
     feature_model: PrefixFeatureModel,
     env_obs: dict[str, Any],
+    *,
+    num_candidates: int | None = None,
 ) -> PrefixObs:
     """Extract a prefix observation through the canonical feature-model API."""
     extractor = getattr(feature_model, "extract_prefix_obs", None)
@@ -53,7 +57,21 @@ def extract_prefix_obs(
         raise TypeError(
             f"{type(feature_model).__name__} must implement extract_prefix_obs()."
         )
-    prefix_obs = extractor(env_obs)
+    if num_candidates is None:
+        prefix_obs = extractor(env_obs)
+    else:
+        if type(num_candidates) is not int or num_candidates < 1:
+            raise ValueError("Expected a positive integer num_candidates.")
+        prefix_obs = extractor(env_obs, num_candidates=num_candidates)
+        candidates = prefix_obs.get("candidates")
+        if (
+            candidates is None
+            or candidates.ndim != 4
+            or candidates.shape[:2] != (prefix_obs["z_rl"].shape[0], num_candidates)
+        ):
+            raise ValueError(
+                "Feature models must return candidates with shape [B, K, horizon, action_dim]."
+            )
     z_width = prefix_obs["z_rl"].shape[-1]
     if z_width != feature_model.z_dim:
         raise ValueError(

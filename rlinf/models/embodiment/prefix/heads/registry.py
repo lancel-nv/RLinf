@@ -94,6 +94,7 @@ def register_prefix_critic(
 
 def _load_builtin_heads() -> None:
     from rlinf.models.embodiment.prefix.heads import mlp as _mlp  # noqa: F401
+    from rlinf.models.embodiment.prefix.heads import residual as _residual  # noqa: F401
 
 
 def get_prefix_actor_spec(name: str) -> ActorHeadSpec:
