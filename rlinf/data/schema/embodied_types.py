@@ -679,6 +679,7 @@ class TrajectoryStep:
         collect_transitions: bool,
         enable_rlt: bool,
         include_final_value: bool,
+        enable_residual: bool = False,
     ) -> "TrajectoryStep":
         """Resolve one joined policy/env pair into self-contained step data.
 
@@ -722,6 +723,7 @@ class TrajectoryStep:
             env,
             collect_transitions=collect_transitions,
             enable_rlt=enable_rlt,
+            enable_residual=enable_residual,
         )
         return step
 
@@ -775,9 +777,23 @@ class TrajectoryStep:
         *,
         collect_transitions: bool,
         enable_rlt: bool,
+        enable_residual: bool = False,
     ) -> None:
         """Extract the transition representation required by the algorithm."""
-        if enable_rlt:
+        if enable_residual:
+            from rlinf.algorithms.sac_residual import extract_residual_obs
+
+            if env.transition.intervene_actions is not None:
+                raise ValueError(
+                    "Residual SAC does not accept env-space intervention actions."
+                )
+            if env.next_obs is None:
+                raise ValueError(
+                    "Residual SAC transitions require next-state features."
+                )
+            current_obs = extract_residual_obs(self.forward_inputs)
+            next_obs = env.next_obs
+        elif enable_rlt:
             from rlinf.algorithms.rlt.transition import (
                 apply_rlt_interventions,
                 extract_rlt_obs_from_forward_inputs,
@@ -1698,13 +1714,16 @@ class EnvOutput:
             else None
         )
 
-        return {
+        observations = {
             "main_images": image_tensor,  # [N_ENV, H, W, C]
             "wrist_images": wrist_image_tensor,  # [N_ENV, H, W, C] or [N_ENV, N_IMG, H, W, C]
             "extra_view_images": extra_view_image_tensor,  # [N_ENV, N_IMG, H, W, C]
             "states": states,
             "task_descriptions": task_descriptions,
         }
+        if "privileged_state" in obs:
+            observations["privileged_state"] = obs["privileged_state"]
+        return observations
 
     def to_dict(self) -> dict[str, Any]:
         return {

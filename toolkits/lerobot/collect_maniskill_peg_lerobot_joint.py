@@ -141,9 +141,9 @@ def _solver_success(result: Any) -> bool:
         for item in reversed(result):
             if isinstance(item, dict) and "success" in item:
                 return _bool_scalar(item["success"])
-            if isinstance(item, (bool, np.bool_)) or hasattr(item, "detach"):
-                return _bool_scalar(item)
-    return _bool_scalar(result)
+    if isinstance(result, (bool, np.bool_)):
+        return bool(result)
+    return False
 
 
 def _import_solver():
@@ -402,6 +402,8 @@ def _create_dataset(
     fps: int,
     image_writer_threads: int,
     image_writer_processes: int,
+    state_dim: int | None = None,
+    action_dim: int | None = None,
 ):
     try:
         try:  # lerobot >= 0.2 layout
@@ -428,12 +430,12 @@ def _create_dataset(
             },
             "state": {
                 "dtype": "float32",
-                "shape": (STATE_DIM,),
+                "shape": (STATE_DIM if state_dim is None else state_dim,),
                 "names": ["state"],
             },
             "actions": {
                 "dtype": "float32",
-                "shape": (ACTION_DIM,),
+                "shape": (ACTION_DIM if action_dim is None else action_dim,),
                 "names": ["actions"],
             },
         },
@@ -442,7 +444,9 @@ def _create_dataset(
     )
 
 
-def _build_env(args: argparse.Namespace, *, control_mode: str):
+def _build_env(
+    args: argparse.Namespace, *, control_mode: str, env_id: str | None = None
+):
     try:
         import gymnasium as gym
     except ImportError as exc:
@@ -458,7 +462,7 @@ def _build_env(args: argparse.Namespace, *, control_mode: str):
     sim_freq -= sim_freq % args.control_freq
 
     env_kwargs: dict[str, Any] = {
-        "id": CAMERA_ENV_ID,
+        "id": CAMERA_ENV_ID if env_id is None else env_id,
         "obs_mode": "rgb",
         "control_mode": control_mode,
         "reward_mode": args.reward_mode,
@@ -473,6 +477,10 @@ def _build_env(args: argparse.Namespace, *, control_mode: str):
         "max_episode_steps": args.max_episode_steps,
     }
     env_kwargs["robot_uids"] = args.robot_uids or CAMERA_ROBOT_UID
+    for key in ("fixed_peg_half_length", "fixed_peg_half_width"):
+        value = getattr(args, key, None)
+        if value is not None:
+            env_kwargs[key] = value
 
     return gym.make(**env_kwargs)
 
@@ -619,7 +627,8 @@ def _replay_joint_delta_episode(
     return replay_records, replay_actions
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the shared ManiSkill demonstration collection argument parser."""
     parser = argparse.ArgumentParser(
         description=(
             "Collect successful widened PegInsertionSide-v1 demos as a replayable "
@@ -644,6 +653,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reward-mode", default="sparse")
     parser.add_argument("--max-episode-steps", type=int, default=100)
     parser.add_argument("--robot-uids", default="")
+    parser.add_argument("--fixed-peg-half-length", type=float, default=None)
+    parser.add_argument("--fixed-peg-half-width", type=float, default=None)
     parser.add_argument(
         "--solver-control-mode",
         default="pd_joint_pos",
@@ -667,7 +678,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Video output directory. Defaults to <dataset_path>_videos.",
     )
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def main() -> None:

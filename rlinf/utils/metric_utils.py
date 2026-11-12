@@ -16,6 +16,7 @@ import math
 import os
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -24,6 +25,39 @@ import torch.distributed
 
 if TYPE_CHECKING:
     from rlinf.data.schema.embodied_types import Trajectory
+
+
+@dataclass
+class CumulativeSuccessRate:
+    """Count one binary success flag per completed collection episode."""
+
+    successful: int = 0
+    completed: int = 0
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.successful) is not int
+            or type(self.completed) is not int
+            or not 0 <= self.successful <= self.completed
+        ):
+            raise ValueError(
+                "Expected integer counts with 0 <= successful <= completed."
+            )
+
+    def update(self, outcomes: torch.Tensor) -> None:
+        """Add episode outcomes, independent of episode length or batch size."""
+        flags = outcomes.detach().reshape(-1)
+        if not torch.all((flags == 0) | (flags == 1)):
+            raise ValueError(
+                "Expected binary episode success flags containing only 0 or 1."
+            )
+        self.successful += int(flags.sum().item())
+        self.completed += flags.numel()
+
+    @property
+    def rate(self) -> float | None:
+        """Return the success fraction, or None until an episode completes."""
+        return self.successful / self.completed if self.completed else None
 
 
 def mean_bool_tensor_rate(

@@ -75,7 +75,9 @@ class MultiStepRolloutWorker(Worker):
         eval_env_cfg = cfg.env.get("eval", None)
         self.enable_train = not self.only_eval and train_env_cfg is not None
         self.enable_eval = (
-            cfg.runner.get("val_check_interval", -1) > 0 or self.only_eval
+            cfg.runner.get("val_check_interval", -1) > 0
+            or (cfg.runner.get("val_critic_interval") or 0) > 0
+            or self.only_eval
         )
         self.rollout_epoch = (
             train_env_cfg.rollout_epoch if train_env_cfg is not None else 1
@@ -85,6 +87,12 @@ class MultiStepRolloutWorker(Worker):
         self.enable_dagger = self.algorithm_cfg.get("loss_type") == "embodied_dagger"
         self.enable_opd = self.algorithm_cfg.get("adv_type") == "opd"
         self.enable_rlt = self.algorithm_cfg.get("loss_type") in {"rlt_ac", "rlt_td3"}
+        self.enable_residual = self.algorithm_cfg.get("loss_type") in {
+            "sac_residual",
+            "expo",
+        }
+        self.residual_base_model = None
+        self.residual_visual_encoder = None
         self.expert_model = None
         self.rlt_feature_model = None
         self.rlt_route = None
@@ -151,7 +159,9 @@ class MultiStepRolloutWorker(Worker):
     @property
     def collect_raw_transition_obs(self) -> bool:
         """Return whether Actor training requires raw transition observations."""
-        return self.collect_transitions and not self.enable_rlt
+        return self.collect_transitions and not (
+            self.enable_rlt or self.enable_residual
+        )
 
     def init_worker(self):
         # Train uses actor.model as the architecture source; overlay rollout.model
@@ -163,6 +173,22 @@ class MultiStepRolloutWorker(Worker):
         if self.cfg.runner.get("ckpt_path", None):
             model_dict = torch.load(self.cfg.runner.ckpt_path)
             self.hf_model.load_state_dict(model_dict)
+
+        if self.enable_residual:
+            self.residual_base_model = get_model(
+                copy.deepcopy(self.cfg.rollout.residual_base_model)
+            )
+            self.residual_base_model.eval().requires_grad_(False)
+            dinov3_cfg = self.cfg.rollout.get("residual_dinov3")
+            if dinov3_cfg is not None:
+                from rlinf.models.embodiment.mlp_policy.dinov3_encoder import (
+                    DINOv3Config,
+                    FrozenDINOv3Encoder,
+                )
+
+                self.residual_visual_encoder = FrozenDINOv3Encoder(
+                    DINOv3Config(**dict(dinov3_cfg))
+                ).to(device=next(self.residual_base_model.parameters()).device)
 
         rlt_feature_model_config = OmegaConf.select(
             self.cfg, "rollout.rlt_feature_model", default=None
@@ -600,6 +626,17 @@ class MultiStepRolloutWorker(Worker):
         rlt_switch_flags: torch.Tensor | None = None,
         intervene_requested: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
+        if self.enable_residual:
+            from rlinf.algorithms.sac_residual import predict_residual_actions
+
+            return predict_residual_actions(
+                self.hf_model,
+                self.residual_base_model,
+                env_obs,
+                final_obs,
+                mode,
+                visual_encoder=self.residual_visual_encoder,
+            )
         if self.rlt_feature_model is not None:
             return predict_rlt_actions(
                 policy_model=self.hf_model,
@@ -748,7 +785,7 @@ class MultiStepRolloutWorker(Worker):
         self,
         env_part: EnvPart,
         policy_obs: dict[str, Any] | None,
-        next_rlt_obs: dict[str, Any] | None,
+        next_policy_obs: dict[str, Any] | None,
         actor_channel: Channel,
     ) -> None:
         next_obs = env_part.next_obs if env_part.next_obs is not None else policy_obs
@@ -763,15 +800,27 @@ class MultiStepRolloutWorker(Worker):
             values = result.get("prev_values")
             if values is not None:
                 final_prev_values = values.cpu().contiguous()
+            if self.enable_residual:
+                from rlinf.algorithms.sac_residual import extract_residual_obs
+
+                next_policy_obs = extract_residual_obs(
+                    result["forward_inputs"], transition=True
+                )
             if self.enable_rlt:
-                next_rlt_obs = extract_rlt_obs_from_forward_inputs(
+                next_policy_obs = extract_rlt_obs_from_forward_inputs(
                     result.get("forward_inputs"), transition=True
                 )
         # Republish environment-owned data here to keep one Actor-channel writer.
         actor_channel.put(
             env_part.complete(
-                next_obs=(next_obs if self.collect_raw_transition_obs else None),
-                next_rlt_obs=next_rlt_obs if self.enable_rlt else None,
+                next_obs=(
+                    next_policy_obs
+                    if self.enable_residual
+                    else next_obs
+                    if self.collect_raw_transition_obs
+                    else None
+                ),
+                next_rlt_obs=next_policy_obs if self.enable_rlt else None,
                 final_prev_values=final_prev_values,
             ),
             async_op=True,
@@ -790,14 +839,18 @@ class MultiStepRolloutWorker(Worker):
             raise ValueError("Environment parts and request sizes must align.")
 
         part_count = len(policy_input.env_parts)
-        next_rlt_obs = (
+        next_policy_obs = (
             extract_rlt_obs_from_forward_inputs(forward_inputs, transition=True)
             if self.enable_rlt and forward_inputs is not None
             else None
         )
-        next_rlt_observations = (
-            split_batch_value(next_rlt_obs, policy_input.request_sizes)
-            if next_rlt_obs is not None
+        if self.enable_residual and forward_inputs is not None:
+            from rlinf.algorithms.sac_residual import extract_residual_obs
+
+            next_policy_obs = extract_residual_obs(forward_inputs, transition=True)
+        next_policy_observations = (
+            split_batch_value(next_policy_obs, policy_input.request_sizes)
+            if next_policy_obs is not None
             else [None] * part_count
         )
         needs_policy_obs = any(
@@ -816,7 +869,7 @@ class MultiStepRolloutWorker(Worker):
         for env_part, policy_obs, next_features in zip(
             policy_input.env_parts,
             policy_observations,
-            next_rlt_observations,
+            next_policy_observations,
         ):
             if env_part is not None:
                 self._publish_env_part(

@@ -1814,7 +1814,17 @@ def test_blocking_weight_sync_allows_bucket_syncer() -> None:
 
 
 def test_async_embodied_runner_startup_sync_is_blocking() -> None:
+    import queue
+    import threading
+
+    from rlinf.utils.metric_logger import MetricLogger
+
     runner = object.__new__(AsyncEmbodiedRunner)
+    runner.cfg = OmegaConf.create({"runner": {"logger": {"logger_backends": []}}})
+    runner.metric_logger = MetricLogger(runner.cfg)
+    runner.log_queue = queue.Queue()
+    runner.log_thread = threading.Thread(target=runner._log_worker)
+    runner.log_thread.start()
     runner.global_step = 0
     runner.max_steps = 0
     runner.actor = _LifecycleWorker()

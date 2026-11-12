@@ -96,6 +96,8 @@ SupportedModel.OPENPI = SupportedModel.register("openpi", force=True)
 SupportedModel.PI0_FAST = SupportedModel.register("pi0_fast", force=True)
 SupportedModel.STARVLA = SupportedModel.register("starvla", force=True)
 SupportedModel.MLP_POLICY = SupportedModel.register("mlp_policy", force=True)
+SupportedModel.SAC_RESIDUAL = SupportedModel.register("sac_residual", force=True)
+SupportedModel.EXPO = SupportedModel.register("expo", force=True)
 SupportedModel.RLT_MLP_POLICY = SupportedModel.register("rlt_mlp_policy", force=True)
 SupportedModel.RLT_TD3_MLP_POLICY = SupportedModel.register(
     "rlt_td3_mlp_policy", force=True
@@ -144,6 +146,7 @@ EMBODIED_MODEL = set(
         SupportedModel.PI0_FAST,
         SupportedModel.STARVLA,
         SupportedModel.MLP_POLICY,
+        SupportedModel.SAC_RESIDUAL,
         SupportedModel.RLT_MLP_POLICY,
         SupportedModel.RLT_TD3_MLP_POLICY,
         SupportedModel.GR00T,
@@ -1077,6 +1080,10 @@ def validate_embodied_cfg(cfg):
         validate_only_eval_rollout_model(cfg.rollout.model)
     model_cfg = cfg.rollout.model if only_eval else cfg.actor.model
     algorithm_cfg = cfg.get("algorithm", {}) or {}
+    if algorithm_cfg.get("loss_type") in {"sac_residual", "expo"}:
+        from rlinf.algorithms.sac_residual import validate_residual_cfg
+
+        validate_residual_cfg(cfg)
     model_type = SupportedModel(model_cfg.model_type)
     assert model_type in EMBODIED_MODEL or model_type in DIFFUSION_MODELS, (
         f"Model type: '{model_cfg.model_type}' is not supported by the embodied runner. "
@@ -1141,7 +1148,11 @@ def validate_embodied_cfg(cfg):
         )
     with open_dict(cfg):
         cfg.runner.val_check_interval = cfg.runner.get("val_check_interval", -1)
-    enable_eval = cfg.runner.val_check_interval > 0 or only_eval
+    enable_eval = (
+        cfg.runner.val_check_interval > 0
+        or (cfg.runner.get("val_critic_interval") or 0) > 0
+        or only_eval
+    )
 
     with open_dict(cfg):
         if enable_eval:

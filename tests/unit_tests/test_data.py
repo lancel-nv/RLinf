@@ -949,6 +949,31 @@ def test_env_output_composes_one_transition_object():
     }
 
 
+@pytest.mark.parametrize("privileged", [False, True])
+def test_env_output_preserves_optional_privileged_state_through_policy_transport(
+    privileged,
+):
+    current = {"states": torch.zeros(3, 10)}
+    final = {"states": torch.ones(3, 10)}
+    if privileged:
+        current["privileged_state"] = torch.randn(3, 31)
+        final["privileged_state"] = torch.randn(3, 31)
+    output = EnvOutput(obs=current, final_obs=final)
+    payload = output.to_dict()
+    for key, expected in (("obs", current), ("final_obs", final)):
+        policy_input = PolicyInput(obs=payload[key])
+        merged = PolicyInput.merge(policy_input.split([1, 2]))
+        assert ("privileged_state" in merged.obs) == privileged
+        for field, value in expected.items():
+            torch.testing.assert_close(merged.obs[field], value)
+    prepared = output.prepare_observations(output.obs)
+    assert ("privileged_state" in prepared) == privileged
+    if privileged:
+        torch.testing.assert_close(
+            prepared["privileged_state"], current["privileged_state"]
+        )
+
+
 def test_removed_duplicate_types_are_not_schema_api():
     import rlinf.data.schema as schema
 
@@ -2864,6 +2889,7 @@ def test_rollout_completes_each_epoch_through_policy_inputs():
     rollout.n_train_chunk_steps = 2
     rollout.num_pipeline_stages = 1
     rollout.env_decoupled_mode = False
+    rollout.enable_residual = False
     rollout.enable_rlt = False
     rollout.collect_transitions = False
     rollout.hf_model = SimpleNamespace(value_head=object())
@@ -2969,6 +2995,7 @@ def test_rollout_routes_external_input_without_model_inference():
     rollout.n_train_chunk_steps = 2
     rollout.num_pipeline_stages = 1
     rollout.env_decoupled_mode = False
+    rollout.enable_residual = False
     rollout.enable_rlt = False
     rollout.collect_transitions = False
     rollout.hf_model = SimpleNamespace(value_head=object())
@@ -3177,6 +3204,7 @@ def test_smooth_intervention_holds_at_the_last_commanded_step():
 
 def test_rollout_runs_requested_terminal_inference_without_a_value_head():
     rollout = object.__new__(MultiStepRolloutWorker)
+    rollout.enable_residual = False
     rollout.enable_rlt = False
     rollout.collect_transitions = False
     rollout._predict_rollout_actions = Mock(
@@ -3208,6 +3236,7 @@ def test_rollout_runs_requested_terminal_inference_without_a_value_head():
 
 def test_rollout_reuses_policy_obs_for_transition_next_obs():
     rollout = object.__new__(MultiStepRolloutWorker)
+    rollout.enable_residual = False
     rollout.enable_rlt = False
     rollout.collect_transitions = True
     actor_channel = Mock()
@@ -3231,6 +3260,7 @@ def test_rollout_reuses_policy_obs_for_transition_next_obs():
 
 def test_rollout_runs_terminal_inference_for_rlt_without_a_value_head():
     rollout = object.__new__(MultiStepRolloutWorker)
+    rollout.enable_residual = False
     rollout.enable_rlt = True
     rollout.collect_transitions = True
     rollout.hf_model = SimpleNamespace()
@@ -3263,6 +3293,7 @@ def test_rollout_runs_terminal_inference_for_rlt_without_a_value_head():
 
 def test_rollout_keeps_next_forward_inputs_only_for_rlt():
     rollout = object.__new__(MultiStepRolloutWorker)
+    rollout.enable_residual = False
     rollout.enable_rlt = True
     rollout.collect_transitions = True
     actor_channel = Mock()
@@ -3610,3 +3641,238 @@ def test_reward_loaders_accept_one_batch_per_rank(tmp_path):
 
     assert len(train_loader) == 1
     assert len(val_loader) == 1
+
+
+def test_maniskill_eef_observation_preserves_cameras_and_replaces_joint_state():
+    pytest.importorskip("gymnasium")
+    from rlinf.envs.sim.maniskill.peg_insertion_side_variants import (
+        wrap_rlt_openpi_joint_obs,
+    )
+
+    main = torch.zeros(2, 4, 4, 3, dtype=torch.uint8)
+    wrist = torch.ones_like(main)
+    raw = {
+        "sensor_data": {
+            "3rd_view_camera": {"rgb": main},
+            "wide_hand_camera": {"rgb": wrist},
+        },
+        "sensor_param": {},
+        "agent": {"qpos": torch.arange(18).reshape(2, 9).float() / 100},
+        "extra": {
+            "tcp_pose": torch.tensor(
+                [[0.1, 0.2, 0.3, -2, 0, 0, 0], [0.4, 0.5, 0.6, 2, 0, 0, 0]]
+            )
+        },
+    }
+    kwargs = {
+        "infos": None,
+        "task_descriptions": ["insert the peg in the hole"] * 2,
+        "num_envs": 2,
+        "device": torch.device("cpu"),
+        "is_peg_insertion_side": True,
+    }
+    joint = wrap_rlt_openpi_joint_obs(copy.deepcopy(raw), **kwargs)
+    eef = wrap_rlt_openpi_joint_obs(copy.deepcopy(raw), eef_state=True, **kwargs)
+    torch.testing.assert_close(joint["states"], raw["agent"]["qpos"])
+    torch.testing.assert_close(eef["main_images"], main)
+    torch.testing.assert_close(eef["wrist_images"], wrist)
+    torch.testing.assert_close(
+        eef["states"],
+        torch.tensor(
+            [
+                [0.1, 0.2, 0.3, 1, 0, 0, 0, 1, 0, 0.15],
+                [0.4, 0.5, 0.6, 1, 0, 0, 0, 1, 0, 0.33],
+            ]
+        ),
+    )
+    assert eef["task_descriptions"] == joint["task_descriptions"]
+    raw["extra"]["tcp_pose"][0, 3:] = 0
+    with pytest.raises(ValueError, match="nonzero TCP quaternion"):
+        wrap_rlt_openpi_joint_obs(raw, eef_state=True, **kwargs)
+
+
+@pytest.mark.parametrize("backend", ["cpu", "physx_cpu", "auto"])
+def test_maniskill_eef_rejects_non_gpu_execution(backend):
+    pytest.importorskip("mani_skill")
+    from rlinf.envs.sim.maniskill.peg_insertion_side_variants import (
+        patch_rlt_openpi_joint_env_args,
+    )
+
+    with pytest.raises(ValueError, match="GPU simulation and GPU IK"):
+        patch_rlt_openpi_joint_env_args(
+            {
+                "id": "PegInsertionSideHardClearance-v1",
+                "sim_backend": backend,
+                "control_mode": "pd_ee_delta_pose",
+            },
+            wrap_obs_mode="openpi_eef_rot6d",
+        )
+
+
+@pytest.mark.parametrize(
+    ("result", "success"),
+    [
+        (-1, False),
+        (None, False),
+        (False, False),
+        (True, True),
+        ({"success": np.array([True])}, True),
+        ((None, 0, False, True, {}), False),
+        ((None, 0, True, False, {"success": torch.tensor([False])}), False),
+        ((None, 0, True, False, {"success": torch.tensor([True])}), True),
+    ],
+)
+def test_maniskill_demonstrations_require_explicit_solver_success(result, success):
+    pytest.importorskip("gymnasium")
+    from toolkits.lerobot.collect_maniskill_peg_lerobot_joint import _solver_success
+
+    assert _solver_success(result) is success
+
+
+def test_maniskill_eef_collector_rejects_cpu_execution(monkeypatch):
+    pytest.importorskip("gymnasium")
+    from toolkits.lerobot.collect_maniskill_peg_lerobot_eef import parse_args
+
+    monkeypatch.setattr("sys.argv", ["collect", "--sim-backend", "physx_cpu"])
+    with pytest.raises(SystemExit) as error:
+        parse_args()
+    assert error.value.code == 2
+
+
+def test_peg_grasp_statistics_weight_episodes_equally_and_filter_failures():
+    from toolkits.lerobot.analyze_maniskill_peg_grasps import summarize_grasps
+
+    episodes = [
+        {"accepted": True, "grasp_median_peg_m": [-0.05, 0, 0], "grasp_frames": 10},
+        {"accepted": True, "grasp_median_peg_m": [-0.06, 0, 0], "grasp_frames": 20},
+        {"accepted": True, "grasp_median_peg_m": [-0.07, 0, 0], "grasp_frames": 1000},
+        {
+            "accepted": False,
+            "grasp_median_peg_m": [100, 100, 100],
+            "grasp_frames": 10000,
+        },
+    ]
+    result = summarize_grasps(episodes)
+    assert result["grasp_point_peg_m"] == [-0.06, 0, 0]
+    assert result["accepted_episodes"] == 3
+    assert result["grasp_min_peg_m"] == pytest.approx([-0.073, -0.005, -0.005])
+    assert result["grasp_max_peg_m"] == pytest.approx([-0.047, 0.005, 0.005])
+    assert result["fraction_episode_medians_in_region"] == 1.0
+    with pytest.raises(ValueError, match="at least one"):
+        summarize_grasps(episodes[-1:])
+
+
+class TestTCPDemonstrationTiming:
+    """Demonstration timing must depend on Cartesian distance, not planner density."""
+
+    @staticmethod
+    def path(positions):
+        poses = np.repeat(np.eye(4)[None], len(positions), axis=0)
+        poses[:, :3, 3] = positions
+        return poses
+
+    @pytest.fixture(autouse=True)
+    def require_scipy(self):
+        pytest.importorskip("scipy.spatial.transform")
+
+    def test_waypoint_density_does_not_slow_insertion(self):
+        from toolkits.lerobot.tcp_trajectory import TCPMotionConfig, retime_tcp_path
+
+        config = TCPMotionConfig()
+        # Both cover 40 cm, but the second planner emits much denser insertion points.
+        coarse = self.path([[0, 0, 0], [0.3, 0, 0], [0.4, 0, 0]])
+        x = np.r_[np.linspace(0, 0.3, 11), np.linspace(0.3, 0.4, 1001)]
+        dense = self.path(np.column_stack((x, np.zeros((len(x), 2)))))
+        expected = retime_tcp_path(coarse, config)
+        actual = retime_tcp_path(dense, config)
+        assert len(actual) == 100
+        np.testing.assert_allclose(actual, expected, atol=1e-10)
+        steps = np.diff(np.r_[0.0, actual[:, 0, 3]])
+        np.testing.assert_allclose(steps * config.control_freq, 0.04, atol=1e-10)
+
+    @pytest.mark.parametrize("points", [2, 31, 301, 3001])
+    def test_exact_tick_endpoint_has_no_extra_dwell(self, points):
+        from toolkits.lerobot.tcp_trajectory import TCPMotionConfig, retime_tcp_path
+
+        x = np.linspace(0, 0.12, points)
+        path = self.path(np.column_stack((x, np.zeros((points, 2)))))
+        result = retime_tcp_path(path, TCPMotionConfig(linear_speed_m_s=0.03))
+        assert len(result) == 40
+        np.testing.assert_allclose(
+            np.diff(np.r_[0, result[:, 0, 3]]), 0.003, atol=1e-10
+        )
+
+    def test_diagonal_motion_and_short_final_step(self):
+        from toolkits.lerobot.tcp_trajectory import TCPMotionConfig, retime_tcp_path
+
+        start = [0, 0, 0]
+        end = [0.011, 0.011, 0.011]
+        path = self.path([start, end])
+        result = retime_tcp_path(path, TCPMotionConfig())
+        distances = np.linalg.norm(
+            np.diff(np.vstack((start, result[:, :3, 3])), axis=0), axis=1
+        )
+        np.testing.assert_allclose(distances[:-1], 0.004, atol=1e-12)
+        assert 0 < distances[-1] <= 0.004
+        np.testing.assert_allclose(result[-1], path[-1])
+
+    def test_shortest_rotation_and_angular_limit(self):
+        from scipy.spatial.transform import Rotation
+
+        from toolkits.lerobot.tcp_trajectory import TCPMotionConfig, retime_tcp_path
+
+        path = self.path([[0, 0, 0], [0.001, 0, 0]])
+        path[:, :3, :3] = Rotation.from_euler(
+            "z", [[179], [-179]], degrees=True
+        ).as_matrix()
+        config = TCPMotionConfig(angular_speed_rad_s=0.1)
+        result = retime_tcp_path(path, config)
+        assert len(result) == 4  # 2 degrees, not a 358-degree long-way rotation.
+        rotations = Rotation.from_matrix(np.concatenate((path[:1], result))[:, :3, :3])
+        angles = (rotations[1:] * rotations[:-1].inv()).magnitude()
+        assert np.max(angles) <= 0.01 + 1e-10
+        np.testing.assert_allclose(result[-1], path[-1])
+        np.testing.assert_allclose(np.linalg.det(result[:, :3, :3]), 1)
+
+    def test_stationary_waypoints_do_not_add_dwell(self):
+        from toolkits.lerobot.tcp_trajectory import TCPMotionConfig, retime_tcp_path
+
+        stationary = self.path(np.zeros((30, 3)))
+        assert len(retime_tcp_path(stationary, TCPMotionConfig())) == 0
+        assert len(retime_tcp_path(stationary[:1], TCPMotionConfig())) == 0
+
+    def test_feedback_caps_translation_norm_and_rotation(self):
+        from scipy.spatial.transform import Rotation
+
+        from toolkits.lerobot.tcp_trajectory import TCPMotionConfig, bounded_tcp_delta
+
+        path = self.path([[0, 0, 0], [1, 1, 1]])
+        path[-1, :3, :3] = Rotation.from_rotvec([0.2, -0.5, 0.8]).as_matrix()
+        delta, rotation = bounded_tcp_delta(*path, TCPMotionConfig())
+        assert np.linalg.norm(delta) == pytest.approx(0.004)
+        assert Rotation.from_matrix(rotation).magnitude() == pytest.approx(0.025)
+        np.testing.assert_allclose(
+            delta / np.linalg.norm(delta), np.ones(3) / np.sqrt(3)
+        )
+
+    @pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
+    @pytest.mark.parametrize(
+        "field", ["linear_speed_m_s", "angular_speed_rad_s", "control_freq"]
+    )
+    def test_invalid_speed_is_rejected(self, field, value):
+        from toolkits.lerobot.tcp_trajectory import TCPMotionConfig
+
+        with pytest.raises(ValueError, match="finite positive"):
+            TCPMotionConfig(**{field: value})
+
+    def test_resume_requires_identical_recorded_timing(self):
+        from toolkits.lerobot.tcp_trajectory import TCPMotionConfig
+
+        config = TCPMotionConfig()
+        config.validate_resume([{"tcp_motion": config.metadata()}])
+        for entry in (
+            {},
+            {"tcp_motion": TCPMotionConfig(linear_speed_m_s=0.02).metadata()},
+        ):
+            with pytest.raises(ValueError, match="same recorded tcp_motion"):
+                config.validate_resume([entry])

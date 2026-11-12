@@ -163,6 +163,53 @@ class Pi0Eval(EnvIO, Pi0):
             "ref_chunk": ref_chunk.to(device=z_rl.device, dtype=torch.float32),
         }
 
+    @torch.no_grad()
+    def extract_residual_obs(
+        self,
+        env_obs: dict[str, Any],
+        *,
+        visual_encoder: torch.nn.Module | None = None,
+        num_candidates: int | None = None,
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
+        """Return frozen visual features and the normalized executed proposal.
+
+        Use the supplied RGB encoder or pool valid base-model prefix tokens.
+        Preserve the padded model action and state for the output transform.
+        """
+        if num_candidates is not None and (
+            type(num_candidates) is not int or num_candidates < 1
+        ):
+            raise ValueError("Expected positive integer num_candidates.")
+        observation = self.env_obs_to_observation(env_obs)
+        prepared = preprocess_observation(observation, train=False)
+        prefix, mask, cache = self.build_prefix_cache(prepared)
+        if visual_encoder is None:
+            weights = mask.to(torch.float32).unsqueeze(-1)
+            visual = (prefix.float() * weights).sum(1) / weights.sum(1).clamp_min(1)
+        else:
+            visual = visual_encoder(env_obs)
+        model_actions = self._sample_actions_from_prefix_cache(prepared, mask, cache)
+        state_dim = self._select_configured_state(env_obs["states"]).shape[-1]
+        obs = {
+            "state": observation.state[:, :state_dim].float(),
+            "visual": visual,
+            "base_action": model_actions[:, : self.action_chunk, : self.action_env_dim]
+            .float()
+            .flatten(1),
+        }
+        if num_candidates is not None:
+            proposals = [obs["base_action"]]
+            # Reuse the image/prompt prefix and DINO features across independent samples.
+            for _ in range(num_candidates - 1):
+                sample = self._sample_actions_from_prefix_cache(prepared, mask, cache)
+                proposals.append(
+                    sample[:, : self.action_chunk, : self.action_env_dim]
+                    .float()
+                    .flatten(1)
+                )
+            obs["candidates"] = torch.stack(proposals, dim=1)
+        return obs, model_actions, observation.state
+
     def _sample_actions_from_prefix_cache(
         self,
         observation,

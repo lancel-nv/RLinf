@@ -36,6 +36,8 @@ _REWARD_SERVER_COMPONENT_NAME = "reward_server"
     version_base="1.1", config_path="config", config_name="maniskill_ppo_openvlaoft"
 )
 def main(cfg) -> None:
+    if cfg.runner.get("max_critic_updates") is not None:
+        raise ValueError("runner.max_critic_updates requires train_async.py.")
     cfg = validate_cfg(cfg)
     print(json.dumps(OmegaConf.to_container(cfg, resolve=True), indent=2))
 
@@ -56,6 +58,12 @@ def main(cfg) -> None:
         from rlinf.workers.actor.fsdp_sac_policy_worker import EmbodiedSACFSDPPolicy
 
         actor_worker_cls = EmbodiedSACFSDPPolicy
+    elif cfg.algorithm.loss_type == "sac_residual":
+        from rlinf.workers.actor.fsdp_sac_residual_policy_worker import (
+            SACResidualFSDPPolicy,
+        )
+
+        actor_worker_cls = SACResidualFSDPPolicy
     elif cfg.algorithm.loss_type == "rlt_ac":
         if use_training_pipeline:
             raise ValueError(

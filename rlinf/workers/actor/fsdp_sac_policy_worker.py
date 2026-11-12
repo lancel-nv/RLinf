@@ -793,18 +793,21 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                 save_full_model_weights=False,
             )
 
-        # save target model
-        target_model_save_path = os.path.join(
-            save_base_path, "sac_components/target_model"
-        )
-        os.makedirs(target_model_save_path, exist_ok=True)
-        target_model_state_dict = self._strategy.get_model_state_dict(
-            self.target_model, cpu_offload=False, full_state_dict=True
-        )
-        torch.save(
-            target_model_state_dict,
-            os.path.join(target_model_save_path, f"checkpoint_rank_{self._rank}.pt"),
-        )
+        if self.target_model is not None:
+            # save target model
+            target_model_save_path = os.path.join(
+                save_base_path, "sac_components/target_model"
+            )
+            os.makedirs(target_model_save_path, exist_ok=True)
+            target_model_state_dict = self._strategy.get_model_state_dict(
+                self.target_model, cpu_offload=False, full_state_dict=True
+            )
+            torch.save(
+                target_model_state_dict,
+                os.path.join(
+                    target_model_save_path, f"checkpoint_rank_{self._rank}.pt"
+                ),
+            )
 
         # save replay buffer
         buffer_save_path = os.path.join(
@@ -834,19 +837,20 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                 load_path=alpha_load_path,
             )
 
-        # load target model
-        target_model_load_path = os.path.join(
-            load_base_path, "sac_components/target_model"
-        )
-        target_model_state_dict = torch.load(
-            os.path.join(target_model_load_path, f"checkpoint_rank_{self._rank}.pt")
-        )
-        self._strategy.load_model_with_state_dict(
-            self.target_model,
-            target_model_state_dict,
-            cpu_offload=False,
-            full_state_dict=True,
-        )
+        if self.target_model is not None:
+            # load target model
+            target_model_load_path = os.path.join(
+                load_base_path, "sac_components/target_model"
+            )
+            target_model_state_dict = torch.load(
+                os.path.join(target_model_load_path, f"checkpoint_rank_{self._rank}.pt")
+            )
+            self._strategy.load_model_with_state_dict(
+                self.target_model,
+                target_model_state_dict,
+                cpu_offload=False,
+                full_state_dict=True,
+            )
 
         # load replay buffer
         buffer_load_path = os.path.join(

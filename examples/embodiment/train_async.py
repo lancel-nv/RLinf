@@ -45,7 +45,21 @@ def main(cfg) -> None:
     # Create actor worker group
     actor_placement = component_placement.get_strategy("actor")
 
-    if cfg.algorithm.loss_type == "embodied_sac":
+    if cfg.algorithm.loss_type == "expo":
+        from rlinf.runners.async_embodied_runner import AsyncEmbodiedRunner
+        from rlinf.workers.actor.fsdp_expo_policy_worker import AsyncEXPOFSDPPolicy
+
+        runner_cls = AsyncEmbodiedRunner
+        actor_worker_cls = AsyncEXPOFSDPPolicy
+    elif cfg.algorithm.loss_type == "sac_residual":
+        from rlinf.runners.async_embodied_runner import AsyncEmbodiedRunner
+        from rlinf.workers.actor.fsdp_sac_residual_policy_worker import (
+            AsyncSACResidualFSDPPolicy,
+        )
+
+        runner_cls = AsyncEmbodiedRunner
+        actor_worker_cls = AsyncSACResidualFSDPPolicy
+    elif cfg.algorithm.loss_type == "embodied_sac":
         from rlinf.runners.async_embodied_runner import AsyncEmbodiedRunner
         from rlinf.workers.actor.async_fsdp_sac_policy_worker import (
             AsyncEmbodiedSACFSDPPolicy,

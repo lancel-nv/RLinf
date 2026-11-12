@@ -17,11 +17,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
 import os
 import subprocess
 import sys
 import textwrap
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,7 +34,11 @@ from omegaconf import OmegaConf
 from rlinf.algorithms.registry import calculate_adv_and_returns
 from rlinf.algorithms.utils import compute_entropy_loss
 from rlinf.runners.reasoning_runner import ReasoningRunner
-from rlinf.utils.metric_utils import compute_evaluate_metrics, compute_rollout_metrics
+from rlinf.utils.metric_utils import (
+    CumulativeSuccessRate,
+    compute_evaluate_metrics,
+    compute_rollout_metrics,
+)
 
 
 def test_compute_evaluate_metrics_reports_interact_delay_wait_time_stats():
@@ -594,3 +600,33 @@ def test_attn_implementation_passes_through_non_flash_choices(monkeypatch):
 
     _flash_availability(monkeypatch)
     assert resolve_attn_implementation("eager") == "eager"
+
+
+def test_cumulative_success_rate_weights_episodes_and_restores_counts():
+    meter = CumulativeSuccessRate()
+    assert meter.rate is None
+    meter.update(torch.empty(0))
+    assert meter.rate is None
+    meter.update(torch.tensor([True]))
+    meter.update(torch.tensor([False, False, True]))
+    assert meter.rate == 0.5
+    restored = CumulativeSuccessRate(**json.loads(json.dumps(asdict(meter))))
+    restored.update(torch.tensor([False, True]))
+    assert restored.completed == 6
+    assert restored.successful == 3
+    assert restored.rate == 0.5
+
+
+@pytest.mark.parametrize("value", [float("nan"), -1.0, 0.5, 2.0])
+def test_cumulative_success_rate_rejects_invalid_outcomes_without_mutation(value):
+    meter = CumulativeSuccessRate(successful=1, completed=2)
+    with pytest.raises(ValueError, match="binary episode success"):
+        meter.update(torch.tensor([1.0, value]))
+    assert meter.completed == 2
+    assert meter.successful == 1
+
+
+@pytest.mark.parametrize("counts", [(-1, 2), (3, 2), (0, -1), (1.0, 2)])
+def test_cumulative_success_rate_rejects_invalid_checkpoint_counts(counts):
+    with pytest.raises(ValueError, match="integer counts"):
+        CumulativeSuccessRate(successful=counts[0], completed=counts[1])

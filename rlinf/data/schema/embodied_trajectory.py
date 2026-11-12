@@ -449,6 +449,8 @@ class AccumulatorOutput(TrajectoryOutput):
             collect_prev_infos=self._collect_prev_infos,
             collect_transitions=self._collect_transitions,
             enable_rlt=self._enable_rlt,
+            enable_residual=self._cfg.algorithm.get("loss_type")
+            in {"sac_residual", "expo"},
             include_final_value=chunk.key.chunk_id == self._chunk_count - 1,
         )
         accumulator.append(step)

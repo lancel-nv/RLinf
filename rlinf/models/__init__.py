@@ -94,6 +94,30 @@ def _register_builtin_models():
 
         return get_model(cfg, torch_dtype)
 
+    def _build_expo(cfg: DictConfig, torch_dtype):
+        from rlinf.models.embodiment.mlp_policy.expo_policy import (
+            EXPOConfig,
+            EXPOPolicy,
+        )
+
+        settings = {
+            key: cfg[key] for key in EXPOConfig.__dataclass_fields__ if key in cfg
+        }
+        return EXPOPolicy(EXPOConfig(**settings))
+
+    def _build_sac_residual(cfg: DictConfig, torch_dtype):
+        from rlinf.models.embodiment.mlp_policy.sac_residual_policy import (
+            SACResidualConfig,
+            SACResidualPolicy,
+        )
+
+        settings = {
+            key: cfg[key]
+            for key in SACResidualConfig.__dataclass_fields__
+            if key in cfg
+        }
+        return SACResidualPolicy(SACResidualConfig(**settings))
+
     def _build_rlt_mlp_policy(cfg: DictConfig, torch_dtype):
         from rlinf.models.embodiment.mlp_policy import get_model
 
@@ -239,6 +263,15 @@ def _register_builtin_models():
     register_model(
         SupportedModel.MLP_POLICY.value,
         _build_mlp_policy,
+        category="embodied",
+        force=True,
+    )
+    register_model(
+        SupportedModel.EXPO.value, _build_expo, category="embodied", force=True
+    )
+    register_model(
+        SupportedModel.SAC_RESIDUAL.value,
+        _build_sac_residual,
         category="embodied",
         force=True,
     )

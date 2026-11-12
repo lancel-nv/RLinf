@@ -29,6 +29,7 @@ from omegaconf.omegaconf import OmegaConf
 
 from rlinf.envs.sim.maniskill.maniskill_env import ManiskillEnv
 from rlinf.envs.sim.maniskill.peg_insertion_side_variants import (
+    OPENPI_EEF_WRAP_MODE,
     RLT_OPENPI_JOINT_WRAP_MODE,
     init_peg_insertion_event_state,
     is_peg_insertion_side_env_id,
@@ -38,6 +39,7 @@ from rlinf.envs.sim.maniskill.peg_insertion_side_variants import (
     resolve_maniskill_task_descriptions,
     restore_peg_insertion_event_state,
     snapshot_peg_insertion_event_state,
+    validate_eef_gpu_controller,
     wrap_rlt_openpi_joint_obs,
 )
 from rlinf.envs.sim.maniskill.utils import allow_pci_render_backend
@@ -95,6 +97,21 @@ class ManiskillRLTEnv(ManiskillEnv):
 
     _RLT_FULL_TASK = "full_task"
     _RLT_CRITICAL_PHASE = "critical_phase"
+    _PEG_REWARD_METRICS = (
+        "dense_stage",
+        "dense_reward",
+        "dense_grasp_cost",
+        "dense_alignment_cost",
+        "dense_depth_cost",
+        "dense_grasped",
+        "dense_aligned",
+        "grasp_region_error_mm",
+        "alignment_error_mm",
+        "alignment_distance_mm",
+        "alignment_axis_error_deg",
+        "depth_remaining_mm",
+        "insertion_depth_mm",
+    )
     _RLT_AUTO_TRIGGER = "auto"
     _RLT_ALWAYS_ON_TRIGGER = "always_on"
     _RLT_INTERVENTION_GATE_TRIGGER = "intervention_gate"
@@ -125,8 +142,24 @@ class ManiskillRLTEnv(ManiskillEnv):
 
         self.cfg = cfg
         self._has_seeded_reset = False
+        self._reset_seed_rng = np.random.default_rng(self.seed)
         self.task_id = getattr(cfg.init_params, "id", None)
         self._is_peg_insertion_side = is_peg_insertion_side_env_id(self.task_id)
+        self._peg_dense_reward_cfg = None
+        if cfg.get("reward_mode") == "peg_staged_dense":
+            if (
+                not self._is_peg_insertion_side
+                or self.use_rel_reward
+                or self.ignore_terminations
+            ):
+                raise ValueError(
+                    "peg_staged_dense requires peg insertion, use_rel_reward=False, and ignore_terminations=False."
+                )
+            from rlinf.envs.sim.maniskill.peg_dense_reward import PegDenseRewardConfig
+
+            self._peg_dense_reward_cfg = PegDenseRewardConfig(
+                **dict(cfg.peg_dense_reward)
+            )
         self._rlt_switch_cfg = getattr(cfg, "rlt_policy_switch", None)
         self._rlt_switch_state: dict[str, torch.Tensor] | None = None
         self._rlt_hole_radius_values: torch.Tensor | None = None
@@ -140,6 +173,12 @@ class ManiskillRLTEnv(ManiskillEnv):
         )
         allow_pci_render_backend()
         self.env: BaseEnv = gym.make(**env_args)
+        if getattr(cfg, "wrap_obs_mode", "default") == OPENPI_EEF_WRAP_MODE:
+            try:
+                validate_eef_gpu_controller(self.env)
+            except Exception:
+                self.env.close()
+                raise
         self.prev_step_reward = torch.zeros(self.num_envs, dtype=torch.float32).to(
             self.device
         )
@@ -749,26 +788,69 @@ class ManiskillRLTEnv(ManiskillEnv):
 
     def _wrap_obs(self, raw_obs, infos=None):
         wrap_obs_mode = getattr(self.cfg, "wrap_obs_mode", "default")
-        if wrap_obs_mode == RLT_OPENPI_JOINT_WRAP_MODE:
+        if wrap_obs_mode in (RLT_OPENPI_JOINT_WRAP_MODE, OPENPI_EEF_WRAP_MODE):
             if self.env.unwrapped.obs_mode != "rgb":
                 raise ValueError(
-                    "wrap_obs_mode='rlt_openpi_joint' requires ManiSkill obs_mode='rgb'."
+                    f"wrap_obs_mode={wrap_obs_mode!r} requires ManiSkill obs_mode='rgb'."
                 )
-            return wrap_rlt_openpi_joint_obs(
+            obs = wrap_rlt_openpi_joint_obs(
                 raw_obs,
                 infos=infos,
                 task_descriptions=self.instruction,
                 num_envs=self.num_envs,
                 device=self.device,
                 is_peg_insertion_side=self._is_peg_insertion_side,
+                eef_state=wrap_obs_mode == OPENPI_EEF_WRAP_MODE,
             )
+            if self.cfg.get("critic_privileged_obs", False):
+                if (
+                    not self._is_peg_insertion_side
+                    or wrap_obs_mode != OPENPI_EEF_WRAP_MODE
+                ):
+                    raise ValueError(
+                        "Privileged peg observations require the EEF peg-insertion environment."
+                    )
+                from rlinf.envs.sim.maniskill.peg_privileged import (
+                    extract_peg_privileged_state,
+                )
+
+                obs["privileged_state"] = extract_peg_privileged_state(
+                    self.env.unwrapped
+                )
+            return obs
         return super()._wrap_obs(raw_obs, infos=infos)
+
+    def _peg_reward(self, info):
+        from rlinf.envs.sim.maniskill.peg_dense_reward import compute_peg_dense_reward
+
+        task = self.env.unwrapped
+        hole_inv = task.box_hole_pose.inv()
+        peg_hole = hole_inv * task.peg.pose
+        reward, metrics = compute_peg_dense_reward(
+            tcp_peg=(task.peg.pose.inv() * task.agent.tcp.pose).p,
+            head_hole=(hole_inv * task.peg_head_pose).p,
+            peg_axis_hole=peg_hole.to_transformation_matrix()[:, :3, 0],
+            box_half_depth=task.peg_half_sizes[:, 0],
+            is_grasped=task.agent.is_grasping(task.peg) & (task.elapsed_steps > 0),
+            success=info["success"],
+            config=self._peg_dense_reward_cfg,
+        )
+        info.update(metrics)
+        return reward
+
+    def _calc_step_reward(self, reward, info):
+        if self._peg_dense_reward_cfg is None:
+            return super()._calc_step_reward(reward, info)
+        reward = self._peg_reward(info)
+        self.prev_step_reward = reward
+        return reward
 
     def _record_metrics(self, step_reward, infos):
         infos = super()._record_metrics(step_reward, infos)
         if not self.record_metrics or "episode" not in infos:
             return infos
         for key in (
+            *self._PEG_REWARD_METRICS,
             "entered_actor_phase_once",
             "actor_switch_step",
             "actor_switch_step_nonzero",
@@ -791,6 +873,7 @@ class ManiskillRLTEnv(ManiskillEnv):
         for key in ("rlt_switch_flags", "intervene_flag"):
             infos[key] = switch_info[key]
         for key in (
+            *self._PEG_REWARD_METRICS,
             "entered_actor_phase_once",
             "actor_switch_step",
             "actor_switch_step_nonzero",
@@ -810,9 +893,18 @@ class ManiskillRLTEnv(ManiskillEnv):
                 if self.use_fixed_reset_state_ids
                 else {}
             )
-            if seed is None:
-                if self.use_fixed_reset_state_ids or not self._has_seeded_reset:
-                    seed = self.seed
+        if seed is not None:
+            self._reset_seed_rng = np.random.default_rng(seed)
+        elif self.use_fixed_reset_state_ids:
+            seed = self.seed
+        elif "env_idx" not in options and (
+            self.cfg.init_params.get("reconfiguration_freq", 0) > 0
+            or options.get("reconfigure", False)
+        ):
+            # Keep scene seeds independent of task RNG consumption during reconfiguration.
+            seed = self._reset_seed_rng.integers(0, 2**31, size=self.num_envs).tolist()
+        elif not self._has_seeded_reset:
+            seed = self.seed
         if seed is not None:
             self._has_seeded_reset = True
         raw_obs, infos = self.env.reset(seed=seed, options=options)
@@ -828,6 +920,8 @@ class ManiskillRLTEnv(ManiskillEnv):
             if self._is_peg_insertion_side:
                 reset_peg_insertion_event_state(self.peg_event_state)
             self._reset_metrics()
+        if self._peg_dense_reward_cfg is not None:
+            self._peg_reward(infos)
         self._reset_persistent_done_state(options.get("env_idx"))
         self._reset_rlt_switch(options.get("env_idx"))
         self._show_goal_site_visual()
@@ -1010,6 +1104,7 @@ class ManiskillRLTEnv(ManiskillEnv):
         for key in ("rlt_switch_flags", "intervene_flag"):
             infos_last[key] = switch_info[key]
         for key in (
+            *self._PEG_REWARD_METRICS,
             "entered_actor_phase_once",
             "actor_switch_step",
             "actor_switch_step_nonzero",
@@ -1066,6 +1161,7 @@ class ManiskillRLTEnv(ManiskillEnv):
         if not isinstance(infos, dict) or "episode" not in infos:
             return
         for key in (
+            *self._PEG_REWARD_METRICS,
             "entered_actor_phase_once",
             "actor_switch_step",
             "actor_switch_step_nonzero",

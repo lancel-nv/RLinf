@@ -1720,3 +1720,40 @@ def test_lingbotvlav2_smoke_config_composes(monkeypatch):
     )
     assert cfg.algorithm.adv_type == "gae" and cfg.algorithm.loss_type == "actor_critic"
     assert cfg.runner.max_steps == 2 and cfg.env.train.total_num_envs == 4
+
+
+def test_openpi_maniskill_eef_rot6d_uses_ten_model_and_seven_controller_actions():
+    pytest.importorskip("openpi")
+    from scipy.spatial.transform import Rotation
+
+    from rlinf.models.embodiment.openpi.dataconfig import get_openpi_config
+    from rlinf.utils.rot6d import matrix_to_rot6d
+
+    cfg = get_openpi_config("pi05_maniskill_eef_rot6d")
+    data = cfg.data.create(cfg.assets_dirs, cfg.model)
+    assert cfg.model.pi05 and cfg.model.discrete_state_input
+    assert cfg.model.action_horizon == 10 and data.use_quantile_norm
+    assert not cfg.data.extra_delta_transform
+    image = np.zeros((32, 32, 3), dtype=np.uint8)
+    command = np.tile([0.1, -0.2, 0.3, 0.2, -0.3, 0.4, 1.0], (10, 1)).astype(np.float32)
+    rotation = matrix_to_rot6d(
+        Rotation.from_euler("XYZ", command[:, 3:6] * -0.1).as_matrix()
+    )
+    actions = np.concatenate((command[:, :3], rotation, command[:, 6:]), axis=-1)
+    state = np.array([0.1, 0.2, 0.3, 1, 0, 0, 0, 1, 0, 0.05], dtype=np.float32)
+    sample = {
+        "image": image,
+        "wrist_image": image + 1,
+        "state": state,
+        "actions": actions,
+    }
+    for transform in (*data.repack_transforms.inputs, *data.data_transforms.inputs):
+        sample = transform(sample)
+    np.testing.assert_array_equal(sample["state"], state)
+    np.testing.assert_allclose(sample["actions"], actions, atol=1e-7)
+    assert sample["image_mask"]["left_wrist_0_rgb"]
+    output = {"actions": np.pad(actions, ((0, 0), (0, 22)))}
+    for transform in data.data_transforms.outputs:
+        output = transform(output)
+    np.testing.assert_allclose(output["actions"], command, atol=1e-6)
+    assert get_openpi_config("pi05_rlt_maniskill_joint").data.output_action_dim == 8
