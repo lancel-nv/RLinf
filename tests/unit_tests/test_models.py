@@ -4504,3 +4504,34 @@ def test_prefix_full_task_route_rejects_competing_routes(rollout_config):
     )
     with pytest.raises(ValueError, match="disabled routing gate"):
         build_prefix_route(cfg)
+
+
+@pytest.mark.parametrize("space", ["environment", "normalized_model"])
+def test_openpi_prefix_action_coordinates(space):
+    from rlinf.models.embodiment.openpi.prefix import OpenPiPrefixMixin
+    from rlinf.models.embodiment.openpi.rlt_config import build_rlt_config
+
+    cfg = OmegaConf.create({"prefix": {"action_space": space}, "openpi": {}})
+    adapter = OpenPiPrefixMixin()
+    adapter.rlt_cfg = build_rlt_config(cfg.openpi, parent_cfg=cfg)
+    adapter.action_env_dim = 2
+    adapter.output_transform = lambda data: {
+        "actions": data["actions"][..., :2] * 3 + 1
+    }
+    actions = torch.randn(3, 5, 32)
+    expected = actions[..., :2]
+    if space == "environment":
+        expected = expected * 3 + 1
+    torch.testing.assert_close(
+        adapter.prefix_action_chunk(actions, torch.zeros(3, 32)), expected
+    )
+
+
+def test_openpi_prefix_rejects_unknown_action_coordinates():
+    from rlinf.models.embodiment.openpi.rlt_config import build_rlt_config
+
+    cfg = OmegaConf.create(
+        {"prefix": {"action_space": "physical_meters"}, "openpi": {}}
+    )
+    with pytest.raises(ValueError, match="prefix.action_space"):
+        build_rlt_config(cfg.openpi, parent_cfg=cfg)

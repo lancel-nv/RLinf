@@ -303,3 +303,71 @@ ManiSkill3 结果
      <source src="https://raw.githubusercontent.com/RLinf/misc/main/pic/embody.mp4" type="video/mp4">
      Your browser does not support the video tag.
    </video>
+
+
+.. _maniskill-eef-preinsert:
+
+从夹持状态训练 EEF 插入
+-----------------------
+
+预插入任务从夹爪已夹住棍子的状态开始，便于单独研究插入过程。环境、专家采集器和 EEF 动作适配器可以独立于 EXPO 使用；在线训练示例将它们与 :doc:`Prefix 框架 <../../extending/prefix>` 及冻结的 pi05 SFT 检查点组合。
+
+环境配置为 ``examples/embodiment/config/env/maniskill_peg_preinsert.yaml``，初始化和执行均使用 NVIDIA GPU 仿真与 GPU IK。它的初始状态分布与 STEAM 示例的完整抓取插孔任务不同：
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - 项目
+     - 配置
+   * - 几何尺寸
+     - 固定 210 × 40 × 40 mm 棍子，孔截面 42 × 42 mm，每侧余量 1 mm。
+   * - 初始姿态
+     - 闭合夹爪夹住棍子，尖端距孔口 50 mm；横向和高度扰动各为 ±30 mm，XYZ 姿态扰动各为 ±3 度。
+   * - 柜子
+     - 平面位置和 yaw 随机，GPU IK 拒绝不可达位置；孔始终位于柜子中心。
+   * - 观测
+     - 第三视角和腕部 RGB 图像；世界系 TCP xyz、按列编码的 rot6d、双指总开度，共 10 维；任务 prompt。
+   * - 数据集动作
+     - 控制器归一化的根坐标系平移、增量旋转的 rot6d、夹爪指令，共 10 维。
+   * - 奖励和时限
+     - 0/1 成功奖励，成功终止；10 Hz 下最多 100 步。EXPO 对超时 transition 继续 bootstrap。
+
+采集并回放示范
+~~~~~~~~~~~~~~
+
+先按 :doc:`pi0` 激活 OpenPI/ManiSkill 环境并下载 Panda 资源，再从仓库根目录运行：
+
+.. code:: bash
+
+   PYTHONPATH="$PWD" python -m toolkits.lerobot.collect_maniskill_peg_preinsert \
+     --output /path/to/preinsert --num-episodes 400 --max-attempts 2000
+
+采集器先对齐棍子，再向孔内推进。每条成功轨迹都会用保存的动作标签、相同 seed 独立回放；只有回放成功且最大状态差异不超过 0.002 的示范才会保留。输出包括 LeRobot ``dataset/``、回放 ``videos/``、逐局 ``traces/`` 和记录成功 seed 及采集尝试的 ``manifest.json``。需要指定渲染设备时，设置 ``--render-backend pci:<GPU-PCI-address>``。
+
+SFT 前使用新数据集重新计算归一化统计：
+
+.. code:: bash
+
+   PYTHONPATH="$PWD" python toolkits/lerobot/calculate_norm_stats.py \
+     --config-name pi05_maniskill_eef_rot6d \
+     --repo-id /path/to/preinsert/dataset
+
+传入绝对数据集路径时，``norm_stats.json`` 写入该数据集目录。``pi05_maniskill_eef_rot6d`` 在统计和训练前规范化状态及动作的旋转表示。填写 ``examples/sft/config/maniskill_peg_preinsert_eef_sft_openpi_pi05.yaml`` 中的基座权重、数据集和统计文件路径，再按 :doc:`sft_openpi` 启动 SFT。该配置使用全局 batch size 256，训练 2,000 次更新；所得检查点的初始成功率需要实测。
+
+使用 EEF 检查点运行 EXPO
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+填写 ``examples/embodiment/config/maniskill_prefix_expo_openpi_pi05_eef_preinsert_async.yaml`` 中的模型和统计文件路径。冻结模型、训练和评测环境适配器、rollout 和 learner 的 actor/critic head 必须使用同一份 SFT 统计。然后运行：
+
+.. code:: bash
+
+   bash examples/embodiment/run_async.sh maniskill_prefix_expo_openpi_pi05_eef_preinsert_async
+
+示例对有效图像和 prompt token 的 pi05 Prefix 特征做 masked mean，并输入 10 维本体状态。预热时执行参考动作，之后在整个预插入回合中使用 EXPO。每轮评测运行 50 局并保存视频。``runner.val_check_interval`` 与 ``runner.save_interval`` 按 runner epoch 计数，``prefix/update_step`` 记录调度时的累计 critic minibatch 更新次数，两者不能直接等同。
+
+``prefix.action_space: normalized_model`` 必须与环境的 ``normalized_actions_stats_path`` 配套。Replay 和 EXPO 保留 10 维归一化模型动作；进入仿真前，环境适配器反归一化，将 rot6d 投影为旋转矩阵，再转换为 7 维 ``pd_ee_delta_pose`` 指令。旋转尺度带符号，为 ``-0.1``。直接评测 SFT 和采集时使用已经解码的 7 维指令，此时不设置 ``normalized_actions_stats_path``。
+
+注册的 ``eef_rot6d_residual_mlp`` 与 ``eef_rot6d_multi_q_mlp`` head 会先撤销旋转归一化，再做施密特正交化后送入网络；平移和夹爪输入保持归一化。编辑器仍将残差加在原始归一化参考动作上，因此 ``edit_scale: 0.02`` 保持 SFT 坐标中的权限上限。熵定义在旋转投影前的编辑分布上。这些 head 使用 Prefix MLP 结构，旧独立 residual policy 的检查点不能直接互换。
+
+环境负责几何、reset、奖励和控制器校验，OpenPI transform 负责数据集表示，注册的 head 负责规范化网络输入。EXPO 只消费 Prefix 张量和 transition，其他任务复用算法时无需导入插孔几何或采集器。迁移后的完整学习曲线需要单独验证，历史成功率不能直接归到此实现。

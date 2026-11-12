@@ -487,14 +487,14 @@ critic target 将一个执行 chunk 内的奖励相加，对下一状态价值�
 
 actor 对 replay 中实际执行的动作进行编辑，并最小化 ``alpha * log_prob - mean(Q)``，其中 Q 取全部在线 critic 的均值。温度训练使用相同的 replay 动作作为编辑条件。示例的 ``algorithm.entropy_tuning.initial_alpha`` 为 ``1e-5``。``target_entropy: null`` 时，对整个执行 chunk 的每个坐标累加 ``log(edit_scale_i) - 0.5`` 作为目标熵。十步、每步八维、尺度 ``0.02`` 对应约 ``-352.96``。编辑动作的概率密度同时计入 tanh 和尺度变换的 Jacobian。
 
-``ref_chunk`` 和 ``candidates`` 使用环境适配器接受的动作坐标。OpenPI 沿用已有的 output transform 解码每个候选。``actor_head.edit_scale`` 使用同一坐标系，可配置为正标量或沿展平 chunk 重复的向量。``0.02`` 表示动作坐标上的修正上限，具体物理含义取决于环境控制器。
+``ref_chunk`` 和 ``candidates`` 使用环境适配器接受的动作坐标。OpenPI 默认使用 ``prefix.action_space: environment``，通过 output transform 解码。只有当环境适配器使用匹配的 SFT 统计解码归一化动作时，才设为 ``prefix.action_space: normalized_model``；此时直接保留模型输出的前 ``action_env_dim`` 维，不执行 output transform。``actor_head.edit_scale`` 使用同一坐标系，可配置为正标量或沿展平 chunk 重复的向量。``0.02`` 表示动作坐标上的修正上限，具体物理含义取决于环境控制器。
 
 采集、回放与检查点
 ^^^^^^^^^^^^^^^^^^
 
 设置 ``rollout.policy_routing: full_task`` 可采集完整任务，同时关闭 routing gate，并移除 ``expert_model`` 配置。示例在收集至少 4,000 个 chunk transition 并完成 20,000 次 learner 预热更新期间，执行冻结模型的参考动作。沿用 Prefix 原有调度，从预热开始，每二十次 critic 更新就执行一次 actor 和温度更新。预热后 rollout 启用 EXPO 选择，learner 每新增一个 transition 分配二十次 critic minibatch 更新。每次更新使用 256 个样本，Q head 数量不会乘进更新次数。每轮追赶更新的上限由 ``rlt_schedule.max_updates_per_train_step`` 控制。
 
-EXPO 将特征调用扩展为 ``extract_prefix_obs(env_obs, num_candidates=K)``。适配器除原有字段外，还需返回形状为 ``[B, K, L, A]`` 的 ``candidates``，首个候选必须等于 ``ref_chunk``。OpenPI 在多次候选采样间复用当前观测的 Prefix cache。Rollout 保留实际执行长度，将当前与下一观测的候选都写入 replay，终止观测也走同一流程。其他算法继续使用原来的特征调用。EXPO 目标函数只依赖这些张量、奖励和终止标志；任务初始化、控制器解码和几何信息属于环境适配器。
+EXPO 将特征调用扩展为 ``extract_prefix_obs(env_obs, num_candidates=K)``。适配器除原有字段外，还需返回形状为 ``[B, K, L, A]`` 的 ``candidates``，首个候选必须等于 ``ref_chunk``。OpenPI 在多次候选采样间复用当前观测的 Prefix cache。Rollout 保留实际执行长度，将当前与下一观测的候选都写入 replay，终止观测也走同一流程。其他算法继续使用原来的特征调用。EXPO 目标函数只依赖这些张量、奖励和终止标志；任务初始化、控制器解码和几何信息属于环境适配器。特定动作表示的编辑器可覆盖 ``ResidualMLPActor.editor_inputs`` 编码条件输入，同时保留残差相加使用的原始参考动作。
 
 Rollout 权重同步会一起发布在线编辑器和 target critic。检查点沿用已有 SAC 保存流程；恢复训练使用 ``runner.resume_dir``。单独评测前，从同一个 actor 检查点目录中读取在线模型和 target 模型，合并所需权重：
 

@@ -93,6 +93,9 @@ def register_prefix_critic(
 
 
 def _load_builtin_heads() -> None:
+    from rlinf.models.embodiment.prefix.heads import (
+        eef_rot6d as _eef_rot6d,  # noqa: F401
+    )
     from rlinf.models.embodiment.prefix.heads import mlp as _mlp  # noqa: F401
     from rlinf.models.embodiment.prefix.heads import residual as _residual  # noqa: F401
 

@@ -189,7 +189,11 @@ jobs:
               # Prefix and its OpenPI mixin have CPU model regression coverage.
               - 'rlinf/models/embodiment/prefix/**'
               - 'rlinf/algorithms/prefix_off_policy/**'
-              - 'examples/embodiment/config/maniskill_prefix_expo_openpi_pi05_async.yaml'
+              - 'examples/embodiment/config/maniskill_prefix_expo_openpi_pi05*.yaml'
+              - 'examples/embodiment/config/env/maniskill_peg_preinsert.yaml'
+              - 'toolkits/lerobot/collect_maniskill_peg_preinsert.py'
+              - 'rlinf/utils/eef_rot6d.py'
+              - 'rlinf/utils/torch_rot6d.py'
               - 'rlinf/models/embodiment/openpi/prefix.py'
               - 'examples/embodiment/config/maniskill_prefix_stage2_td3_mlp_steam*.yaml'
               - 'rlinf/robotics/**'
