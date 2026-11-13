@@ -1,0 +1,51 @@
+{
+  "date": "2026-11-13",
+  "hardware": "2 x NVIDIA RTX 5880 Ada Generation, 48 GB each",
+  "fresh_venv_install": true,
+  "python": "3.11.14",
+  "torch": "2.11.0",
+  "cuda": "13.0",
+  "imported_transformers": "4.53.2 (rlinf-transformer-openpi)",
+  "hf_repo_id": "lancel-nv/pi05-peg-preinsert-1mm-eef-sft2000",
+  "hf_revision": "96c29a03adf29a750e8d40f243f8ba65887f1188",
+  "hf_public_weights_lfs_sha256_verified": true,
+  "hf_cli_norm_download_verified": true,
+  "full_weights_download_repeated": false,
+  "weight_source": "Existing local checkpoint with SHA256 identical to the published HF LFS object",
+  "cpu_tests": {
+    "passed": 19,
+    "deselected": 129
+  },
+  "baseline_eval": {
+    "episodes": 50,
+    "successes": 21,
+    "sr": 0.42,
+    "all_episode_outcomes_match_history": true
+  },
+  "historical_final_checkpoint_eval": {
+    "critic_updates": 800000,
+    "episodes": 50,
+    "successes": 35,
+    "sr": 0.7,
+    "all_episode_outcomes_match_history": true
+  },
+  "all_initial_scene_hashes_match_history": true,
+  "videos_verified": 100,
+  "checkpoint_queue_once_verified": true,
+  "smoke_train": {
+    "exit_code": 0,
+    "critic_updates": 400,
+    "actor_updates": 19,
+    "collected_transitions": 146,
+    "checkpoint_verified": true,
+    "overrides": {
+      "runner.max_critic_updates": 400,
+      "runner.save_critic_interval": 400,
+      "algorithm.residual_schedule.warmup_transitions": 32,
+      "algorithm.residual_schedule.warmup_updates": 20,
+      "algorithm.residual_schedule.critic_warmup_updates": 20,
+      "algorithm.replay_buffer.min_buffer_size": 32
+    }
+  },
+  "full_800000_update_training_repeated": false
+}

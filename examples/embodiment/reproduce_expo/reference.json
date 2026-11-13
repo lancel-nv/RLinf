@@ -1,0 +1,42 @@
+{
+  "runtime_reference_commit": "f918557b",
+  "historical_run": "peg_preinsert_1mm_sft2000_pi05pool_expo_20261111_v1",
+  "historical_runtime_difference": "peg_preinsert.py gained joint-controller support; EEF keeps the same arm.kinematics and IK operations.",
+  "sft_step": 2000,
+  "weights_sha256": "d089fe5544bc945a04b7ca9f89572493dcfbcffbc31c52f8ebfba636d399ad17",
+  "norm_stats_sha256": "2396b7cd0ef181debaf4af880e5d865442dc20f4a00b74a8a4ca8e894c82cf74",
+  "original_implementation_sha256": {
+    "rlinf/algorithms/expo.py": "b4306080536f5fd76ee8d35d3bc4aa58e18942560971f77af909c2fc74ee2e7b",
+    "rlinf/models/embodiment/mlp_policy/expo_policy.py": "86131763ec596b2cc1ed707567c4eb16cb55c6e0077f5beea8d35d1b41a21dfa",
+    "rlinf/workers/actor/fsdp_expo_policy_worker.py": "1bcb228336b9523c6d6b7ac9e004efaf8ef467efbf940a7071d2d8f3fef8b314",
+    "examples/embodiment/config/maniskill_expo_openpi_pi05_dinov3_eef_async.yaml": "aa58e78732b7821f0db07d92c6410f0c6bb603d44bf567850e9b03d8a328e2d8",
+    "rlinf/algorithms/sac_residual.py": "e14a668c71931e71c88070466d0fdea5d357733773fa4e2f52d692d78d5a6191",
+    "rlinf/models/embodiment/mlp_policy/sac_residual_policy.py": "c9dd0be919390730f20bb454fca8a3ecc1ffb3411ec53b9c9bd2b77bcd07262d",
+    "rlinf/models/embodiment/openpi/tasks/eval.py": "42277b680f95da63697eac4686e5cdc13b8448e1184c7772e2ae4155cb81d5d1",
+    "rlinf/workers/actor/fsdp_sac_residual_policy_worker.py": "359cdc45e6dd1901815c734837bb81c050d97203ea15545896df049b7c8f9ce1",
+    "rlinf/workers/actor/fsdp_sac_policy_worker.py": "e5b2626c7d57cb761a5e26bae329cd6034c7fce6d575fab4dd7228ea95a3b800",
+    "rlinf/data/schema/embodied_trajectory.py": "c0466b5f6b85f4f0c7ac7f85bb4c6c99c1a3eaf905f9cde17069675d72f6d01e",
+    "rlinf/runners/async_embodied_runner.py": "75ffdc8f59526658144cda54d9c8a2204582c35057dcecc04d3566874f30e8a4",
+    "rlinf/models/__init__.py": "90e2fec9febde282cdb1e3d9ff6a67c143855a6c36c2461d0f7d8d11f8541f5e",
+    "rlinf/config.py": "04eb829dcdb641f5c8d2af1e1aadeef79a0af9f83220dd5e4a71eebf1fd664cb",
+    "rlinf/workers/rollout/hf/huggingface_worker.py": "b3265b4ec3a83024fab645c6f1805034f95efca0df35473b1ab6b879183d1fb0",
+    "rlinf/workers/env/env_worker.py": "cd246e77fd40c959fd6e14d9ec0c17e02fc62c85c50e4462e7e99a995e5814ab",
+    "examples/embodiment/train_async.py": "c5c5876303add3a12c9f16780e818a207f40cd69fc406afd781c512f029a6ea7",
+    "tests/unit_tests/test_sac_residual.py": "fbee5db587357a5727b578fbfe7d2f8540fdeaf07fb8ca573de62aea5a2f5007",
+    "docs/source-en/rst_source/reference/algorithms/sac.rst": "bae7e196eab5999f1fb70f32593102971b442ec5fc6fbf7f3e6ae21b4b48c3cc",
+    "docs/source-zh/rst_source/reference/algorithms/sac.rst": "9243a34a21d853649032b4f019f45d1c6ff046cb638aaaa93da37ffb459480f2"
+  },
+  "successes_out_of_50": {
+    "sft": 21,
+    "100000": 36,
+    "200000": 42,
+    "300000": 39,
+    "400000": 40,
+    "500000": 33,
+    "600000": 38,
+    "700000": 31,
+    "800000": 35
+  },
+  "hf_repo_id": "lancel-nv/pi05-peg-preinsert-1mm-eef-sft2000",
+  "hf_revision": "96c29a03adf29a750e8d40f243f8ba65887f1188"
+}

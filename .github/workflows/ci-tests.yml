@@ -105,6 +105,7 @@ jobs:
               - 'rlinf/runners/async_weight_sync_mixin.py'
               - 'rlinf/runners/*reward*.py'
               - 'examples/embodiment/*'
+              - 'examples/embodiment/reproduce_expo/**'
               - 'examples/embodiment/config/*/**'
               - 'examples/embodiment/config/maniskill_sac_residual_openpi_pi05.yaml'
               - 'examples/embodiment/config/maniskill_sac_residual_openpi_pi05_async.yaml'
